@@ -1,6 +1,89 @@
-# NOTES — cashu-mpp v0.1 retro
+# NOTES — cashu-mpp retro
 
 Captured during the spike. Not a polished doc.
+
+## v0.2: Stripe MPP wire format (2026-05-21)
+
+After v0.1 shipped, operator clarified that "mpp" in the project name refers to **Stripe's Machine Payments Protocol** (`https://mpp.dev`), not NUT-24 or Lightning multi-path payments. v0.1 used NUT-24's `X-Cashu` header pattern. v0.2 rewires to MPP framing with `cashu` as an *unregistered* payment method.
+
+**Wire shape v0.2 emits:**
+
+```
+HTTP/1.1 402 Payment Required
+Content-Type: application/problem+json
+Cache-Control: no-store
+WWW-Authenticate: Payment id="<HMAC>", realm="cashu-mpp",
+                  method="cashu", intent="charge",
+                  request="<b64url(JCS)>", expires="<RFC3339>",
+                  opaque="<b64url(JCS)>"
+
+{ "type": "https://paymentauth.org/problems/payment-required",
+  "title": "Payment Required", "status": 402, "detail": "...",
+  "challengeId": "<HMAC>" }
+```
+
+Retry:
+```
+GET /random?bits=128
+Authorization: Payment <b64url({
+  "challenge": { realm, method, intent, request, expires, opaque },
+  "id": "<HMAC echoed>",
+  "source": "anonymous",
+  "payload": { "token": "cashuB..." }
+})>
+```
+
+Success:
+```
+HTTP/1.1 200 OK
+Payment-Receipt: <b64url({
+  "challengeId", "method": "cashu", "reference": "<sha256(token) hex>",
+  "settlement": { "amount", "currency" },
+  "status": "success", "timestamp": "<RFC3339>"
+})>
+```
+
+**Design calls made under spec ambiguity:**
+
+- **HMAC algorithm + canonical input.** The spec says challenges are bound through `realm | method | intent | request | expires | digest | opaque` with "empty string for absent slot." That phrasing rules out JCS-of-an-object (JCS would just omit absent fields) and points at fixed-position concat. Picked literal U+007C pipe bytes as the separator, HMAC-SHA-256 as the hash, base64url-no-pad as the id encoding. Stateless server design — no challenge table, the HMAC *is* the challenge id.
+- **Cashu as unregistered method.** Used `method="cashu"`. Stripe's registry has `tempo` and `stripe`; cashu isn't there. No interop with Stripe-side verifiers is claimed.
+- **Request blob shape for `method="cashu"`.** JCS-canonicalized JSON with `amount` (decimal string), `currency` (`"sat"`), `mints` (string array), and `nut18` (full creqA payment request). The first three fields let a non-cashu client surface a price; the `nut18` blob lets a cashu-aware client deserialize natively without parsing our extension.
+- **Opaque field bound to request URL.** JCS of `{"url": "/random?bits=N"}`. Prevents a client from retrying with the credential at a different endpoint than the one that issued the 402. The HMAC binding already locks all other parameters; opaque is the spec-defined hook to bind transport-level context too.
+- **Source = "anonymous".** Unlocked cashu tokens have no payer identity to assert. When v0.x adds P2PK bond mode, `source` becomes the payer's pubkey.
+- **Receipt reference = `hex(SHA-256(token))`.** No on-chain hash; this is a correlation handle the receipt-holder can verify against the token they sent. Doesn't leak the token itself.
+- **Verification failure → 402, malformed → 400.** Per spec problem types: a present-but-invalid credential returns 402 with `type=…/verification-failed`. A garbled header returns 400 with `type=…/malformed-credential`. A request-level error (bits out of range) is 400 with `type=…/bad-request`.
+
+**What's still spec-shaped but unimplemented in v0.2:**
+
+- Replay protection beyond `expires`. The spec says "Each credential is valid for exactly one request"; we don't track used credentials. A client could retry indefinitely while the challenge is unexpired. The natural fix is an in-memory LRU of `(challenge_id, sha256(token))` pairs — a few lines, but adds state to a deliberately stateless server. Deferred.
+- Multiple methods on the same endpoint. Spec example shows `tempo` and `stripe` advertised together via two `WWW-Authenticate: Payment` headers. We emit one. Adding Stripe SPT or any other method would require a second method-specific module and a chooser in the handler.
+- Receipt signing. Spec doesn't mandate it, but a real deployment would HMAC the receipt under a server key so receipt-holders can prove provenance. Our receipt is plain base64url JSON.
+
+**Smoke transcript v0.2 (2026-05-21):**
+
+```
+[smoke] step 1: build in-memory wallet against https://testnut.cashu.space
+[smoke] step 2: mint 10 sat against testnut (auto-settle)
+[smoke]   minted 10 sat across 7 proof(s)
+[smoke]   token = cashuBo2FteBtodHRwczovL3Rlc3RudXQuY2FzaH...  (2134 chars)
+[smoke] step 3: GET http://127.0.0.1:3000/random?bits=128 (no auth, expect 402)
+[smoke]   402 ok; problem type = https://paymentauth.org/problems/payment-required
+[smoke] step 4: parse WWW-Authenticate + Cashu request blob
+[smoke]   challenge id=x5PMKR0Z9rhQP31F amount=10 mints=["https://testnut.cashu.space"]
+[smoke]   server nut18 = creqApmFp9mFhCmF1Y3NhdGF
+[smoke] step 5: build credential and retry
+[smoke]   200 ok; receipt method=cashu status=success settled=10sat timestamp=2026-05-21T22:55:09.067795+00:00
+[smoke]   reference (sha256 of token, hex) = 342e3edac9c419e8271bba77db81cd8b0ad1d1db411d49b36614818e9e6dfa32
+[smoke]   random_hex = af03e07999f33e5523368d52fe1e8170
+
+[smoke] PASS
+```
+
+Five unit tests in `src/mpp.rs` cover challenge-id round-trip, tamper detection, empty-slot equivalence, credential auth-header round-trip, WWW-Authenticate parsing, and JCS base64url round-trip.
+
+---
+
+# v0.1 retro (preserved below — NUT-24 framing, superseded by v0.2)
 
 ## CDK survey
 

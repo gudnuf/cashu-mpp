@@ -6,10 +6,16 @@ edition = "2024"
 [dependencies]
 anyhow = "1.0.102"
 axum = "0.8.9"
+base64 = "0.22.1"
 cdk = { version = "0.16.0", default-features = false, features = ["wallet"] }
+chrono = { version = "0.4.44", features = ["serde"] }
+hex = "0.4.3"
+hmac = "0.13.0"
 rand = "0.10.1"
 serde = { version = "1.0.228", features = ["derive"] }
+serde_jcs = "0.2.0"
 serde_json = "1.0.150"
+sha2 = "0.11.0"
 tokio = { version = "1.52.3", features = ["full"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
