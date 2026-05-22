@@ -1,23 +1,64 @@
-//! MPP (Machine Payments Protocol) wire format.
+//! MPP (Machine Payments Protocol) wire format primitives.
 //!
-//! Implements the HTTP 402 transport from <https://mpp.dev>: WWW-Authenticate /
-//! Authorization / Payment-Receipt headers, JCS-canonicalized payment requests
-//! and opaque blobs, and HMAC-SHA-256 challenge binding so the server is
+//! Implements the HTTP 402 transport from <https://mpp.dev>: `WWW-Authenticate: Payment`,
+//! `Authorization: Payment`, and `Payment-Receipt` headers, JCS-canonicalized payment
+//! requests and opaque blobs, and HMAC-SHA-256 challenge binding so the server is
 //! stateless across the 402 → retry round-trip.
 //!
 //! The challenge `id` is `base64url(HMAC-SHA-256(secret, realm|method|intent|request|expires|digest|opaque))`
 //! with empty string for absent slots and U+007C pipe bytes as the separator.
 //! That means the server holds only the HMAC key — challenges live in the wire
 //! values themselves, echoed back unchanged by the client per the spec.
+//!
+//! This crate is method-agnostic and does no network I/O. For the cashu method
+//! validator (token decode, mint allowlist, NUT-07 checkstate), see the
+//! companion `cashu-mpp-cashu` crate.
 
-use anyhow::{anyhow, bail, Context, Result};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use hmac::{Hmac, KeyInit, Mac};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use sha2::Sha256;
+use thiserror::Error;
 
 type HmacSha256 = Hmac<Sha256>;
+
+/// Errors produced by this crate.
+#[derive(Debug, Error)]
+pub enum MppError {
+    /// Header value did not start with `Payment ` (case-insensitive).
+    #[error("not a Payment scheme header")]
+    BadScheme,
+    /// Auth-param was malformed (missing `=`, etc.).
+    #[error("malformed auth-param: {0}")]
+    BadAuthParam(String),
+    /// A required auth-param was absent.
+    #[error("missing required auth-param: {0}")]
+    MissingParam(&'static str),
+    /// base64url decode failed.
+    #[error("base64url decode: {0}")]
+    Base64(#[from] base64::DecodeError),
+    /// JSON encode failed.
+    #[error("JSON encode: {0}")]
+    JsonEncode(#[source] serde_json::Error),
+    /// JSON decode failed.
+    #[error("JSON decode: {0}")]
+    JsonDecode(#[source] serde_json::Error),
+    /// JCS canonicalization failed.
+    #[error("JCS encode: {0}")]
+    JcsEncode(#[source] serde_json::Error),
+    /// HMAC binding did not match the echoed challenge id.
+    #[error("HMAC binding mismatch — challenge id does not match echoed parameters")]
+    BindingMismatch,
+    /// `expires` field was not a valid RFC 3339 timestamp.
+    #[error("bad expires timestamp: {0}")]
+    BadExpires(String),
+    /// Challenge is past its `expires` instant.
+    #[error("challenge expired at {0}")]
+    Expired(String),
+}
+
+pub type Result<T> = std::result::Result<T, MppError>;
 
 /// 32-byte secret used to HMAC-bind challenge IDs. Generated once at startup.
 #[derive(Clone)]
@@ -79,7 +120,7 @@ impl Challenge {
         if constant_time_eq(expected.as_bytes(), claimed_id.as_bytes()) {
             Ok(())
         } else {
-            bail!("challenge id does not match HMAC binding")
+            Err(MppError::BindingMismatch)
         }
     }
 
@@ -90,13 +131,13 @@ impl Challenge {
         let rest = value
             .strip_prefix("Payment ")
             .or_else(|| value.strip_prefix("payment "))
-            .ok_or_else(|| anyhow!("WWW-Authenticate must use Payment scheme"))?;
+            .ok_or(MppError::BadScheme)?;
 
         let mut params = std::collections::HashMap::new();
         for part in split_auth_params(rest) {
             let (name, raw_value) = part
                 .split_once('=')
-                .ok_or_else(|| anyhow!("auth-param missing '=' in {part:?}"))?;
+                .ok_or_else(|| MppError::BadAuthParam(part.clone()))?;
             let name = name.trim().to_ascii_lowercase();
             let v = raw_value.trim();
             let unquoted = if v.starts_with('"') && v.ends_with('"') && v.len() >= 2 {
@@ -107,11 +148,11 @@ impl Challenge {
             params.insert(name, unquoted);
         }
 
-        let take = |k: &str| {
+        let take = |k: &'static str| {
             params
                 .get(k)
                 .cloned()
-                .ok_or_else(|| anyhow!("missing required auth-param: {k}"))
+                .ok_or(MppError::MissingParam(k))
         };
         let id = take("id")?;
         let challenge = Challenge {
@@ -188,7 +229,7 @@ pub struct Credential {
 impl Credential {
     /// Encode for transport in the `Authorization` header value.
     pub fn to_auth_header_value(&self) -> Result<String> {
-        let json = serde_json::to_vec(self)?;
+        let json = serde_json::to_vec(self).map_err(MppError::JsonEncode)?;
         Ok(format!("Payment {}", URL_SAFE_NO_PAD.encode(json)))
     }
 
@@ -197,11 +238,9 @@ impl Credential {
         let rest = value
             .strip_prefix("Payment ")
             .or_else(|| value.strip_prefix("payment "))
-            .ok_or_else(|| anyhow!("Authorization must use Payment scheme"))?;
-        let json = URL_SAFE_NO_PAD
-            .decode(rest.trim().as_bytes())
-            .context("base64url decode credential")?;
-        let cred: Credential = serde_json::from_slice(&json).context("credential JSON")?;
+            .ok_or(MppError::BadScheme)?;
+        let json = URL_SAFE_NO_PAD.decode(rest.trim().as_bytes())?;
+        let cred: Credential = serde_json::from_slice(&json).map_err(MppError::JsonDecode)?;
         Ok(cred)
     }
 
@@ -216,10 +255,10 @@ impl Credential {
             return Ok(());
         };
         let exp = chrono::DateTime::parse_from_rfc3339(exp_str)
-            .with_context(|| format!("parse expires={exp_str}"))?
+            .map_err(|_| MppError::BadExpires(exp_str.clone()))?
             .with_timezone(&chrono::Utc);
         if now > exp {
-            bail!("challenge expired at {exp_str}");
+            return Err(MppError::Expired(exp_str.clone()));
         }
         Ok(())
     }
@@ -245,23 +284,21 @@ pub struct Settlement {
 
 impl Receipt {
     pub fn to_header_value(&self) -> Result<String> {
-        let json = serde_json::to_vec(self)?;
+        let json = serde_json::to_vec(self).map_err(MppError::JsonEncode)?;
         Ok(URL_SAFE_NO_PAD.encode(json))
     }
 }
 
 /// JCS-canonicalize a serializable value and base64url-encode.
 pub fn encode_jcs_b64<T: Serialize>(value: &T) -> Result<String> {
-    let canonical = serde_jcs::to_vec(value).context("JCS encode")?;
+    let canonical = serde_jcs::to_vec(value).map_err(MppError::JcsEncode)?;
     Ok(URL_SAFE_NO_PAD.encode(canonical))
 }
 
 /// Reverse of `encode_jcs_b64`: base64url-decode then JSON-deserialize.
 pub fn decode_jcs_b64<T: DeserializeOwned>(b64: &str) -> Result<T> {
-    let bytes = URL_SAFE_NO_PAD
-        .decode(b64.as_bytes())
-        .context("base64url decode")?;
-    let v: T = serde_json::from_slice(&bytes).context("JSON decode")?;
+    let bytes = URL_SAFE_NO_PAD.decode(b64.as_bytes())?;
+    let v: T = serde_json::from_slice(&bytes).map_err(MppError::JsonDecode)?;
     Ok(v)
 }
 
@@ -295,10 +332,12 @@ mod tests {
         let id = c.bound_id(&fixed_key());
         c.verify_id(&fixed_key(), &id).unwrap();
 
-        // tamper with one field → fails
         let mut c2 = c.clone();
         c2.intent = "session".to_string();
-        assert!(c2.verify_id(&fixed_key(), &id).is_err());
+        assert!(matches!(
+            c2.verify_id(&fixed_key(), &id),
+            Err(MppError::BindingMismatch)
+        ));
     }
 
     #[test]
@@ -314,7 +353,6 @@ mod tests {
         };
         let mut b = a.clone();
         b.opaque = Some("".into());
-        // both bind to the same canonical string (empty == None for canonical input)
         assert_eq!(a.bound_id(&fixed_key()), b.bound_id(&fixed_key()));
     }
 
@@ -362,16 +400,19 @@ mod tests {
     }
 
     #[test]
+    fn bad_scheme_is_typed() {
+        let err = Credential::from_auth_header_value("Bearer foo").unwrap_err();
+        assert!(matches!(err, MppError::BadScheme));
+    }
+
+    #[test]
     fn jcs_b64_round_trip() {
         #[derive(Serialize, Deserialize, PartialEq, Debug)]
         struct V {
             b: i32,
             a: String,
         }
-        let v = V {
-            b: 7,
-            a: "x".into(),
-        };
+        let v = V { b: 7, a: "x".into() };
         let encoded = encode_jcs_b64(&v).unwrap();
         let decoded: V = decode_jcs_b64(&encoded).unwrap();
         assert_eq!(v, decoded);

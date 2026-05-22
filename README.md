@@ -1,48 +1,68 @@
 # cashu-mpp
 
-Spike: [Stripe MPP](https://mpp.dev) wire format with cashu as the payment method. Server-side validation in Rust. No `/melt` redemption.
+A verifier SDK for [Stripe MPP](https://mpp.dev) with cashu as the payment method. Drop it into any HTTP server, get 402-gated endpoints paid in cashu — validation only, no `/melt` redemption.
 
 ## What this is
 
-A demo server that exposes `GET /random?bits=N` and gates it behind a Cashu payment, using Stripe's Machine Payments Protocol (MPP) as the HTTP-level handshake. The "cashu" method itself is **not on Stripe's registered method list** — this spike implements it as an unregistered extension to validate the wire-format end to end.
+[MPP](https://mpp.dev) (Machine Payments Protocol) is Stripe's HTTP 402-based payment framework: `WWW-Authenticate: Payment` on the challenge, `Authorization: Payment` on the retry, `Payment-Receipt` on the success. This SDK implements the wire format and ships a verifier for `method=cashu` — an unregistered extension that carries a NUT-18 payment request out and a cashuB token back.
 
-The flow:
+You wire it into your axum / actix / hono / express / fastapi / whatever server, point it at an allowlisted Cashu mint, set a price, and your endpoint is gated. The SDK handles challenge HMAC binding, credential parsing, mint contact (NUT-07 checkstate), and receipt construction. The server stays stateless: the challenge id is `HMAC-SHA-256(secret, realm|method|intent|request|expires|digest|opaque)`, so there's no challenge table to maintain.
 
-1. Client `GET /random`.
-2. Server replies `402 Payment Required` with `WWW-Authenticate: Payment ...` carrying an HMAC-bound challenge and a NUT-18 payment request.
-3. Client mints 10 sat from the allowed mint and builds an `Authorization: Payment <base64url(JSON)>` credential.
-4. Client retries. Server verifies the HMAC binding, decodes the `cashuB` token, runs NUT-07 `post_check_state` against the mint, and on success returns the resource plus a `Payment-Receipt` header.
-
-Validation only — tokens stay unspent at the mint after the server hands back the resource.
-
-## Hardcoded for the spike
-
-| Field | Value |
-|-------|-------|
-| Price | 10 sat |
-| Unit | `sat` |
-| Allowed mint | `https://testnut.cashu.space` |
-| Listen | `0.0.0.0:3000` |
-| Realm | `cashu-mpp` |
-| Method | `cashu` (unregistered) |
-| Challenge TTL | 5 min |
-| Challenge binding | HMAC-SHA-256, key generated at server startup |
-
-## Running
-
-Terminal A:
+## Repo layout
 
 ```
-cargo run
+cashu-mpp/
+├── rust/                       # Rust workspace (this is the reference impl)
+│   ├── cashu-mpp-core          # Wire format. No network, no cashu. Framework-agnostic.
+│   ├── cashu-mpp-cashu         # Cashu method validator. Depends on core + cdk.
+│   └── examples/random/        # Demo server: GET /random gated at 10 sat.
+├── README.md
+└── NOTES.md                    # Design retro.
 ```
 
-Terminal B:
+Planned: `js/` (npm package), `py/` (FastAPI etc), `go/`. Same wire format across all; conformance tested with shared test vectors. See M2+ in NOTES.md.
+
+## Using the Rust SDK
+
+```rust
+use std::time::Duration;
+use cashu_mpp_cashu::{CashuMpp, Outcome};
+
+// at startup:
+let mpp = CashuMpp::builder()
+    .realm("my-service")
+    .price(10)                                       // sat
+    .allowed_mint("https://testnut.cashu.space")
+    .challenge_ttl(Duration::from_secs(300))
+    .build()?;
+
+// at the boundary (any framework — this is just http types):
+let url = "/premium?id=42";
+match mpp.authorize(&headers, url).await {
+    Outcome::Authorized(payment) => {
+        // do the work, attach payment.receipt_header_value() to the response
+    }
+    Outcome::NeedsPayment(challenge) => {
+        // return 402 with WWW-Authenticate: <challenge.www_authenticate>
+        // and application/problem+json body: <challenge.body>
+    }
+    Outcome::Rejected(problem) => {
+        // return <problem.status> with application/problem+json body
+    }
+}
+```
+
+The SDK speaks `http::HeaderMap` and `http::StatusCode` — used by axum, actix, hyper, warp, reqwest. No framework lock-in.
+
+## Running the demo
 
 ```
-cargo run --example smoke
+cd rust
+cargo run -p random-server                     # terminal A
+cargo run -p random-server --example smoke     # terminal B
 ```
 
-The smoke test mints from `testnut.cashu.space` via the `cdk` crate, drives the full 402 → credential → 200 handshake, and asserts the receipt shape.
+The smoke test mints 10 sat against `testnut.cashu.space` via cdk, drives the full 402 → credential → 200 handshake, and asserts the `Payment-Receipt` header shape. Look for `[smoke] PASS`.
 
 For a manual peek at the 402:
 
@@ -50,22 +70,23 @@ For a manual peek at the 402:
 curl -i 'localhost:3000/random?bits=128'
 ```
 
-## Layout
+## Design
 
-| File | Purpose |
-|------|---------|
-| `src/main.rs` | axum server, request handler, challenge / credential / receipt construction |
-| `src/mpp.rs` | MPP types: `Challenge`, `Credential`, `Receipt`. HMAC binding, JCS encoding, `WWW-Authenticate` parser. Five unit tests. |
-| `examples/smoke.rs` | End-to-end client: mint via `cdk`, parse 402, build credential, retry, verify receipt. |
-| `NOTES.md` | Design retro: spec ambiguities and the calls we made under them. |
+| Decision | Choice | Why |
+|----------|--------|-----|
+| Challenge binding | HMAC-SHA-256 over `realm\|method\|intent\|request\|expires\|digest\|opaque` (U+007C pipe, empty string for absent slots) | Stateless server, matches mpp.dev spec text |
+| Validation depth | NUT-07 `post_check_state` against the mint | Strong online "valid + unspent" signal; DLEQ deferred to v0.2 |
+| Wire shape for `request` | JCS-canonicalized JSON with `amount`, `currency`, `mints[]`, `nut18` | Non-cashu clients can read the price; cashu clients deserialize the NUT-18 blob natively |
+| Opaque binding | Server-side JCS-encoded URL path+query | Credential issued for one URL can't be replayed against another |
+| Receipt reference | `hex(SHA-256(token))` | Non-secret correlation handle, doesn't leak the token itself |
+| Method registry | `method="cashu"` (unregistered) | Stripe's registry has `tempo` and `stripe`; cashu is a third-party extension |
 
-## Out of scope
+See `NOTES.md` for the full retro on what the spec is ambiguous about and what we picked.
 
-- `/melt` redemption (server takes custody of the ecash). Use case is closer to "fiat-equivalent payment" than the validate-only "soft commitment" the spike implements.
-- NUT-10 P2PK + locktime "bond mode" — payer locks ecash to themselves with a future locktime. Sketched in NOTES.md.
-- Replay protection beyond `expires` on the challenge. Spec calls for one-shot credentials; we accept the same credential repeatedly while unexpired.
-- A second payment method on the same endpoint (Stripe SPT, Tempo, ...).
-- Receipt signing.
-- SDK extraction into a reusable receive crate.
+## What's not here yet
 
-See `NOTES.md` for the full retro.
+- Replay protection beyond `expires` (spec calls for one-shot credentials)
+- NUT-12 DLEQ offline verification (latency win for proofs that carry DLEQ data)
+- Multi-method support on one endpoint (e.g. `tempo` + `cashu` advertised together)
+- Receipt signing
+- Non-Rust ports (planned as separate workspaces under `js/`, `py/`)

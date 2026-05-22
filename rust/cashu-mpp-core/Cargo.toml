@@ -1,0 +1,19 @@
+[package]
+name = "cashu-mpp-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "MPP (Machine Payments Protocol) wire format primitives: Challenge, Credential, Receipt, HMAC binding, JCS encoding. Framework-agnostic. No network calls."
+readme = "README.md"
+
+[dependencies]
+base64 = { workspace = true }
+chrono = { workspace = true }
+hmac = { workspace = true }
+rand = { workspace = true }
+serde = { workspace = true }
+serde_jcs = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+thiserror = { workspace = true }

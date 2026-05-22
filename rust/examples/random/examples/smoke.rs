@@ -18,7 +18,7 @@ use std::time::Duration;
 use anyhow::{anyhow, Context, Result};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
-use cashu_mpp::mpp::{self, Credential};
+use cashu_mpp_core::{self as mpp, Credential};
 use cdk::amount::{Amount, SplitTarget};
 use cdk::mint_url::MintUrl;
 use cdk::nuts::{CurrencyUnit, MintQuoteState, PaymentMethod};
@@ -154,7 +154,7 @@ async fn run() -> Result<()> {
     println!("[smoke]   402 ok; problem type = {problem_type}");
 
     println!("[smoke] step 4: parse WWW-Authenticate + Cashu request blob");
-    let (challenge_id, challenge) = cashu_mpp::mpp::Challenge::parse_www_authenticate(&www_auth)
+    let (challenge_id, challenge) = cashu_mpp_core::Challenge::parse_www_authenticate(&www_auth)
         .context("parse WWW-Authenticate")?;
     if challenge.method != "cashu" {
         return Err(anyhow!("expected method=cashu, got {}", challenge.method));

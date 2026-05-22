@@ -411,26 +411,35 @@ dependencies = [
 ]
 
 [[package]]
-name = "cashu-mpp"
+name = "cashu-mpp-cashu"
 version = "0.1.0"
 dependencies = [
- "anyhow",
- "axum",
- "base64 0.22.1",
+ "cashu-mpp-core",
  "cdk",
- "cdk-sqlite",
  "chrono",
  "hex",
+ "http",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "cashu-mpp-core"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "chrono",
  "hmac",
  "rand 0.10.1",
- "reqwest",
  "serde",
  "serde_jcs",
  "serde_json",
  "sha2",
- "tokio",
- "tracing",
- "tracing-subscriber",
+ "thiserror",
 ]
 
 [[package]]
@@ -2091,6 +2100,28 @@ name = "rand_core"
 version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "63b8176103e19a2643978565ca18b50549f6101881c443590420e4dc998a3c69"
+
+[[package]]
+name = "random-server"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "base64 0.22.1",
+ "cashu-mpp-cashu",
+ "cashu-mpp-core",
+ "cdk",
+ "cdk-sqlite",
+ "hex",
+ "http",
+ "rand 0.10.1",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
 
 [[package]]
 name = "redox_syscall"

@@ -1,0 +1,37 @@
+[workspace]
+resolver = "2"
+members = [
+    "cashu-mpp-core",
+    "cashu-mpp-cashu",
+    "examples/random",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/gudnuf/cashu-mpp"
+authors = ["gudnuf"]
+
+[workspace.dependencies]
+anyhow = "1.0.102"
+axum = "0.8.9"
+base64 = "0.22.1"
+cashu-mpp-core = { path = "cashu-mpp-core", version = "0.1.0" }
+cashu-mpp-cashu = { path = "cashu-mpp-cashu", version = "0.1.0" }
+cdk = { version = "0.16.0", default-features = false, features = ["wallet"] }
+cdk-sqlite = { version = "0.16.0", default-features = false, features = ["wallet"] }
+chrono = { version = "0.4.44", features = ["serde"] }
+hex = "0.4.3"
+hmac = "0.13.0"
+http = "1"
+rand = "0.10.1"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_jcs = "0.2.0"
+serde_json = "1.0.150"
+sha2 = "0.11.0"
+thiserror = "2"
+tokio = { version = "1.52.3", features = ["full"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
